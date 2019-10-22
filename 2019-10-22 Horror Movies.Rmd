@@ -1,0 +1,105 @@
+---
+title: "2019-10-22 Horror Movies"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+theme_set(theme_light())
+library(tidyverse)
+library(skimr)
+library(lubridate)
+library(glue)
+library(broom)
+```
+
+First of all, let's read in the data and view the columns we currently have
+
+```{r raw_data}
+horror_movies_raw <- readr::read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2019/2019-10-22/horror_movies.csv") 
+
+head(horror_movies_raw,6)
+```
+
+From a quick glance it looks like we can make the following changes
+
+* Convert release_date to date
+* Extract year from title
+* Seperate currency from budget column
+* Extract minutes from movie_run_time
+* Extract country from filming location
+* Extract director from Plot
+
+The following columns contain multiple entries so are difficult splitting out at this early stage. Might be worth splitting out if we try use xgbBoost to predict review_rating (for example).
+
+* genres
+* cast
+
+
+
+```{r clean_data}
+horror_movies <- horror_movies_raw %>% 
+  extract(title,"year","\\((\\d\\d\\d\\d)\\)$",remove = FALSE,convert = TRUE) %>% 
+  extract(plot,"directed_by","^Directed by (.*)\\.\\sWith",remove = FALSE) %>% 
+  mutate(release_date = dmy(release_date),
+         release_month = month(release_date),
+         release_year = year(release_date),
+         next_halloween = if_else(release_month > 10, 
+                                  ymd(glue("{release_year +1}-10-31")),
+                                  ymd(glue("{release_year}-10-31"))),
+         days_before_halloween = next_halloween - release_date,
+         currency = str_extract(budget,"^\\D*"),
+         budget = parse_number(budget),
+         filming_country = str_trim(str_extract(filming_locations,"(?!.*,).*$")), 
+         movie_run_time_mins = parse_number(movie_run_time)
+         ) 
+  
+
+  glimpse(horror_movies)
+```
+
+First question I have: does the review_ratings increase as the number of movies a director films increases?
+```{r}
+horror_movies1 <- horror_movies %>% 
+  group_by(directed_by) %>% 
+  mutate(directors_x_movie = rank(release_date,ties.method = "first")) %>% ungroup()
+
+
+horror_movies1 %>% ggplot(aes(directors_x_movie)) + geom_density() # shows majority of direcors only film one horror movie
+horror_movies1 %>% ggplot(aes(x = as_factor(directors_x_movie),y = review_rating)) + geom_boxplot()
+
+```
+
+Nope, there doesn't look to be much of a relationship. Let's compute an analysis of variance.
+
+```{r}
+horror_movies %>% lm(review_rating ~ directors_x_movie, data = .) %>% anova() %>% tidy()
+```
+
+This p value here indicates that the variance of review_rating cannot be explained by the number of movies a director has filmed.
+
+```{r}
+horror_movies %>% count(movie_run_time,sort = T)
+fct_genres <- horror_movies %>% mutate(release_country = fct_lump(release_country,2))
+
+fct_genres %>% mutate(no_rating = is.na(review_rating)) %>% ggplot(aes(release_date, fill = release_country)) + geom_histogram() + facet_wrap(~no_rating)
+
+```
+
+```{r}
+horror_movies %>% lm(review_rating ~ release_country, data = .) %>% anova() %>% tidy()
+```
+
+```{r}
+horror_movies %>% ggplot(aes(x = days_before_halloween)) + geom_histogram()
+```
+
+```{r}
+horror_movies %>% ggplot(aes(review_rating)) + geom_density() + facet_wrap(~movie_rating)
+shapiro.test(horror_movies$review_rating)
+```
+
+
+
