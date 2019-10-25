@@ -12,7 +12,9 @@ library(skimr)
 library(lubridate)
 library(glue)
 library(broom)
+library(skimr)
 theme_set(theme_light())
+library(tidytext)
 ```
 
 First of all, let's read in the data and view the columns we currently have
@@ -53,11 +55,13 @@ horror_movies <- horror_movies_raw %>%
          currency = str_extract(budget,"^\\D*"),
          budget = parse_number(budget),
          filming_country = str_trim(str_extract(filming_locations,"(?!.*,).*$")), 
-         movie_run_time_mins = parse_number(movie_run_time)
+         movie_run_time_mins = parse_number(movie_run_time),
+         movie_run_time_bins = fct_explicit_na(cut(movie_run_time_mins, 4,rm.na = TRUE))
          ) 
   
-
   glimpse(horror_movies)
+  
+  skimr=(horror_movies)
 ```
 
 
@@ -88,5 +92,38 @@ horror_movies %>% ggplot(aes(review_rating)) + geom_density() + facet_wrap(~movi
 shapiro.test(horror_movies$review_rating)
 ```
 
+```{r}
+horror_movies %>% group_by(movie_run_time_bins) %>% summarise(avg = mean(review_rating,na.rm = TRUE))
+
+horror_movies %>% ggplot(aes(x = movie_run_time_bins, y = review_rating)) + geom_boxplot()
+
+horror_movies %>% aov(review_rating ~ movie_run_time_bins, data = .) %>% summary()
+
+horror_movies %>% lm(review_rating ~ year, data = .) %>% summary()
+horror_movies %>% filter(year >2005)%>% ggplot(aes(x = year, y = review_rating))  + geom_point()
+
+```
+
+```{r}
+genre <- horror_movies %>% select(genres,language,movie_run_time_mins,review_rating) %>% 
+  separate_rows(genres,sep = "\\| ?") %>% mutate(genres = fct_reorder(genres,review_rating))
+
+genre %>% ggplot(aes(x = fct_reorder(genres,review_rating), y = review_rating)) + geom_boxplot() + coord_flip()
+
+aov<- aov(review_rating ~ genres,genre )
+summary(aov)
+
+
+tukey<-TukeyHSD((aov)) %>% tidy %>% arrange(adj.p.value) 
+
+tukey %>% filter(adj.p.value < 0.05) %>% ggplot(aes(x = fct_reorder(comparison,estimate), y = estimate )) + geom_point() + 
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high)) +coord_flip()
+```
+Here we can see Animation scores on average 2.8 higher than horror movies which are also based on Sport
+
+
+```{r linear_test}
+genre %>% lm(review_rating ~ genres, data = .) %>% summary()
+```
 
 
