@@ -15,6 +15,7 @@ library(broom)
 library(skimr)
 theme_set(theme_light())
 library(tidytext)
+library(gridExtra)
 ```
 
 First of all, let's read in the data and view the columns we currently have
@@ -38,8 +39,6 @@ The following columns contain multiple entries so are difficult splitting out at
 
 * genres
 * cast
-
-
 
 ```{r clean_data}
 horror_movies <- horror_movies_raw %>% 
@@ -73,10 +72,9 @@ horror_movies1 <- horror_movies %>%
   group_by(directed_by) %>% 
   mutate(directors_x_movie = rank(release_date,ties.method = "first")) %>% ungroup()
 
-
-horror_movies1 %>% ggplot(aes(directors_x_movie)) + geom_density() # shows majority of direcors only film one horror movie
-horror_movies1 %>% ggplot(aes(x = as_factor(directors_x_movie),y = review_rating)) + geom_boxplot()
-
+G1 <- horror_movies1 %>% ggplot(aes(directors_x_movie)) + geom_density() # shows majority of direcors only film one horror movie
+G2 <- horror_movies1 %>% ggplot(aes(x = as_factor(directors_x_movie),y = review_rating)) + geom_boxplot()
+grid.arrange(G1,G2,nrow = 1)
 ```
 
 Nope, there doesn't look to be much of a relationship. Let's compute an analysis of variance.
@@ -104,25 +102,58 @@ horror_movies %>% filter(year >2005)%>% ggplot(aes(x = year, y = review_rating))
 
 ```
 
+Let's now look at the review rating by genre and see if there are any significant differences between genres.
+
 ```{r}
 genre <- horror_movies %>% select(genres,language,movie_run_time_mins,review_rating) %>% 
   separate_rows(genres,sep = "\\| ?") %>% mutate(genres = fct_reorder(genres,review_rating))
 
 genre %>% ggplot(aes(x = fct_reorder(genres,review_rating), y = review_rating)) + geom_boxplot() + coord_flip()
 
-aov<- aov(review_rating ~ genres,genre )
+aov<- aov(review_rating ~ genres,genre)
 summary(aov)
+```
 
+We will use Tukey's Honest Significant Difference test to look at pairswise differences. This a parametric approach so we do need to check the data does not violate the assumptions.
+- Normality
+- Constant variance
 
-tukey<-TukeyHSD((aov)) %>% tidy %>% arrange(adj.p.value) 
+As there are many groups, I will look at the residuals.
+```{r}
+par(mfrow=c(2,2))
+plot(aov)
+```
+
+Looks like the assumption for constant variance is slightly violated by the examining the first plot. The variance of residuals increases between review ratings between 5 and 5.5. 
+
+```{r}
+tukey <-TukeyHSD(aov) %>% tidy %>% arrange(adj.p.value) 
 
 tukey %>% filter(adj.p.value < 0.05) %>% ggplot(aes(x = fct_reorder(comparison,estimate), y = estimate )) + geom_point() + 
-  geom_errorbar(aes(ymin = conf.low, ymax = conf.high)) +coord_flip()
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high)) + coord_flip()
+
 ```
-Here we can see Animation scores on average 2.8 higher than horror movies which are also based on Sport
+
+Here we can see Animation, scores on average, 2.8 higher than Horror movies which are also based on Sport. 
+
+I'd be interested to know what movies have genres Horror and Sport.
+
+```{r}
+horror_movies %>% filter(str_detect(genres,"Sport")) %>% arrange(review_rating) %>% kable()
+```
+
+_Below is a review for Brutal(2014). Doesn't sound too great:
+
+I somehow made it all the way to the unoriginal and empty ending.
+
+There really is nothing good about this movie. It is the same garbage over and over, with minimal change or development. The acting is increasingly bad with each scene, like worse than an free intro to acting class. The production and music are equally bad; both are rushed and try so very hard to achieve something but fantastically fail.
+
+I cant believe this movie was even made. Did ANYONE view it before giving it the OK? There is a 41 minute episode of Star Trek that covers this essential plot and does it with more intelligence and substance.
+
+Worse than TV-only movies by far. All positive reviews of this movie are fake. Very few movies I wish I never would have come across. This tops the list._
 
 
-```{r linear_test}
+```{r linear_test, eval=FALSE, include=FALSE}
 genre %>% lm(review_rating ~ genres, data = .) %>% summary()
 ```
 
