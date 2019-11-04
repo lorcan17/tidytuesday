@@ -1,0 +1,114 @@
+---
+title: "2019-10-27 NYC Squirrel Census"
+output: html_document:
+  code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+Read in the data
+```{r Set Up}
+library(tidyverse)
+library(tidymodels)
+library(lubridate)
+library(forcats)
+library(knitr)
+```
+
+
+```{r Clean Data}
+nyc_squirrels_raw <- readr::read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2019/2019-10-29/nyc_squirrels.csv")
+nyc_squirrels <- nyc_squirrels_raw %>% mutate(shift = as_factor(shift),
+                                              date = mdy(date),
+                                              age = fct_explicit_na(fct_relevel(age,"Juvenile")),
+                                              primary_fur_color = fct_explicit_na(primary_fur_color),
+                                              #highlight_fur_color = fct_explicit_na(highlight_fur_color))
+                                              location = fct_explicit_na(fct_relevel(location,"Ground Plane")))
+
+nyc_squirrels <- nyc_squirrels %>%  select(date,age,primary_fur_color,location,running,chasing,climbing,eating,foraging, kuks,tail_flags,approaches,indifferent,runs_from)
+
+```
+
+This is a great dataset with lots of variables. I'm going to use this dataset to practise my machine learning techniques.
+
+I'm going to create a model that can accuractely predict if a squirrel is on the ground or above the ground.
+
+I'm going to be using the tidymodels workflow, and following this helpful guide:
+https://towardsdatascience.com/modelling-with-tidymodels-and-parsnip-bae2c01c131c
+https://www.benjaminsorensen.me/post/modeling-with-parsnip-and-tidymodels/
+
+Given that there are only 64 missing data points for location, I will remove these.
+```{r}
+nyc_squirrels %>% count(location)
+nyc_squirrels <- nyc_squirrels %>% filter(location != "(Missing)") %>% droplevels()
+
+levels(nyc_squirrels$location)
+```
+
+### Train and Test Split
+
+Firstly, create a randomised training and test plit of the original data.
+```{r}
+set.seed(seed = 1) 
+train_test_split <- initial_split(data = nyc_squirrels,prop = 0.8)
+
+train_set <- training(train_test_split)
+test_set <- testing(train_test_split)
+
+```
+
+### Create recipe
+Here we prep a recipe for how we want to transform our data and then apply these steps to the train and test set
+```{r}
+recipe <- recipe(location ~ ., data = train_set) %>% 
+  step_dummy(primary_fur_color,age,one_hot = T) %>% 
+  prep(train_set)
+
+train_baked <- bake(recipe,new_data = train_set)
+test_baked <- bake(recipe,new_data = test_set)
+```
+
+### Fit the model
+```{r}
+boost_tree <- boost_tree(mode = "classification") %>% 
+  set_engine("xgboost") %>% 
+  fit(location ~ ., data = train_baked)
+```
+
+### Performance Assesment
+```{r}
+predictions_xgb <- boost_tree %>% 
+  predict(new_data = test_baked) %>% 
+  bind_cols(test_baked %>% select(location))
+```
+There are several metrics that can be used to investigate the performance of a classification model but for simplicity I’m only focusing on a selection of them: accuracy, precision, recall and F1_Score.
+
+```{r}
+predictions_xgb %>%
+  conf_mat(location, .pred_class) %>%
+  pluck(1) %>%
+  as_tibble() %>%
+  ggplot(aes(Prediction, Truth, alpha = n)) +
+  geom_tile(show.legend = FALSE) +
+  geom_text(aes(label = n), colour = "white", alpha = 1, size = 8)
+```
+
+```{r}
+predictions_xgb %>%
+  metrics(location, .pred_class) %>%
+  select(-.estimator) %>%
+  filter(.metric == "accuracy")
+```
+
+```{r}
+tibble(
+  "precision" = 
+     precision(predictions_xgb, location, .pred_class) %>%
+     select(.estimate),
+  "recall" = 
+     recall(predictions_xgb, location, .pred_class) %>%
+     select(.estimate)
+) %>%
+  kable(digits = 2)
+```
+
