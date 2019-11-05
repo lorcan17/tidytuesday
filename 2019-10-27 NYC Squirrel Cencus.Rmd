@@ -1,33 +1,8 @@
 ---
 title: "2019-10-27 NYC Squirrel Census"
-output: html_document:
-  code_folding: hide
-editor_options: 
-  chunk_output_type: console
+output: rmarkdown::github_document
 ---
-
-Read in the data
-```{r Set Up}
-library(tidyverse)
-library(tidymodels)
-library(lubridate)
-library(forcats)
-library(knitr)
-```
-
-
-```{r Clean Data}
-nyc_squirrels_raw <- readr::read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2019/2019-10-29/nyc_squirrels.csv")
-nyc_squirrels <- nyc_squirrels_raw %>% mutate(shift = as_factor(shift),
-                                              date = mdy(date),
-                                              age = fct_explicit_na(fct_relevel(age,"Juvenile")),
-                                              primary_fur_color = fct_explicit_na(primary_fur_color),
-                                              #highlight_fur_color = fct_explicit_na(highlight_fur_color))
-                                              location = fct_explicit_na(fct_relevel(location,"Ground Plane")))
-
-nyc_squirrels <- nyc_squirrels %>%  select(date,age,primary_fur_color,location,running,chasing,climbing,eating,foraging, kuks,tail_flags,approaches,indifferent,runs_from)
-
-```
+# 2019-10-27 NYC Squirrel Census
 
 This is a great dataset with lots of variables. I'm going to use this dataset to practise my machine learning techniques.
 
@@ -36,19 +11,49 @@ I'm going to create a model that can accuractely predict if a squirrel is on the
 I'm going to be using the tidymodels workflow, and following this helpful guide:
 https://towardsdatascience.com/modelling-with-tidymodels-and-parsnip-bae2c01c131c
 https://www.benjaminsorensen.me/post/modeling-with-parsnip-and-tidymodels/
+https://www.alexpghayes.com/blog/implementing-the-super-learner-with-tidymodels/
+
+Read in the data
+```{r Set Up, message=FALSE, warning=FALSE, paged.print=TRUE}
+knitr::opts_chunk$set(
+  fig.path = "README_figs/README-"
+)
+# Load libraries
+library(tidyverse)
+library(tidymodels)
+library(lubridate)
+library(forcats)
+library(knitr)
+library(janitor)
+library(xgboost)
+```
+
+Now clean
+```{r Clean Data, warning=FALSE}
+nyc_squirrels_raw <- readr::read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2019/2019-10-29/nyc_squirrels.csv")
+nyc_squirrels <- nyc_squirrels_raw %>% mutate(shift = as_factor(shift),
+                                              date = mdy(date),
+                                              age = fct_explicit_na(fct_relevel(age,"Juvenile")),
+                                              primary_fur_color = fct_explicit_na(primary_fur_color),
+                                              #highlight_fur_color = fct_explicit_na(highlight_fur_color))
+                                              location = fct_explicit_na(fct_relevel(location,"Ground Plane")))
+# Only interested in the below variables
+nyc_squirrels <- nyc_squirrels %>%  select(date,age,primary_fur_color,location,running,chasing,climbing,eating,foraging, kuks,tail_flags,approaches,indifferent,runs_from)
+
+```
 
 Given that there are only 64 missing data points for location, I will remove these.
-```{r}
+
+```{r warning=FALSE}
 nyc_squirrels %>% count(location)
 nyc_squirrels <- nyc_squirrels %>% filter(location != "(Missing)") %>% droplevels()
 
-levels(nyc_squirrels$location)
 ```
 
 ### Train and Test Split
-
 Firstly, create a randomised training and test plit of the original data.
-```{r}
+
+```{r warning=FALSE}
 set.seed(seed = 1) 
 train_test_split <- initial_split(data = nyc_squirrels,prop = 0.8)
 
@@ -58,8 +63,10 @@ test_set <- testing(train_test_split)
 ```
 
 ### Create recipe
-Here we prep a recipe for how we want to transform our data and then apply these steps to the train and test set
-```{r}
+Here we prep a recipe for how we want to transform our data and then apply these steps to the train and test set.
+
+```{r warning=FALSE}
+set.seed(seed = 1) 
 recipe <- recipe(location ~ ., data = train_set) %>% 
   step_dummy(primary_fur_color,age,one_hot = T) %>% 
   prep(train_set)
@@ -69,7 +76,9 @@ test_baked <- bake(recipe,new_data = test_set)
 ```
 
 ### Fit the model
-```{r}
+
+```{r warning=FALSE}
+set.seed(seed = 1) 
 boost_tree <- boost_tree(mode = "classification") %>% 
   set_engine("xgboost") %>% 
   fit(location ~ ., data = train_baked)
@@ -80,14 +89,16 @@ xgb.plot.importance(importance)
 ```
 
 ### Performance Assesment
-```{r}
+
+```{r warning=FALSE}
 predictions_xgb <- boost_tree %>% 
   predict(new_data = test_baked) %>% 
   bind_cols(test_baked %>% select(location))
 ```
+
 There are several metrics that can be used to investigate the performance of a classification model but for simplicity I’m only focusing on a selection of them: accuracy, precision, recall and F1_Score.
 
-```{r}
+```{r warning=FALSE}
 predictions_xgb %>%
   conf_mat(location, .pred_class) %>%
   pluck(1) %>%
@@ -97,8 +108,7 @@ predictions_xgb %>%
   geom_text(aes(label = n), colour = "white", alpha = 1, size = 8)
 ```
 
-
-```{r}
+```{r warning=FALSE}
 predictions_xgb %>%
   conf_mat(location, .pred_class) %>% summary() %>% 
   select(-.estimator) %>%
@@ -109,25 +119,69 @@ predictions_xgb %>%
 
 Wow, so on first go it seems we have built a model which can fairly accuractely predict if a squirrel is above ground or not.
 
+```{r warning=FALSE}
+boost_tree %>% 
+  predict(new_data = test_baked,type = "prob") %>% clean_names %>% select(pred_ground_plane) %>% 
+  bind_cols(test_baked %>% select(location)) %>% 
+  gain_curve(truth = location,pred_ground_plane) %>% autoplot()
+  
+```
+
 ### Hyper Parameter Tuning
+Create a random grid of parameters object values. Parameters we can tune can be found here: 
+https://tidymodels.github.io/parsnip/reference/boost_tree.html
 
-```{r}
-folds <- vfold_cv(train_baked,20)
+I have chosen to tune mtry, learn rate, and tree depth only but could have tuned all found in the above link.
 
-folded <- folds %>% bind_cols(mtry = 1:20) %>% mutate(
-  # First create analysis and assesment sets
-  analysis = map(splits, analysis),
+```{r warning=FALSE}
+library(dials)
+set.seed(seed = 1) 
+
+xgb_grid <- grid_random(
+mtry(c(1,10)),
+learn_rate(c(0,1),trans = NULL),
+tree_depth(c(1,20)),
+size = 10) %>% mutate(model_id = row_number()) 
+
+xgb_grid
+```
+
+Now use K-Fold Cross-Validation to determine which set of parameters is the most accurate. 
+
+Reminder:
+3-Fold CV is split into 3 equal sized groups and is tested like below:
+*Model1: Trained on Fold1 + Fold2, Tested on Fold3
+*Model2: Trained on Fold2 + Fold3, Tested on Fold1
+*Model3: Trained on Fold1 + Fold3, Tested on Fold2
+
+https://machinelearningmastery.com/k-fold-cross-validation/
+
+### Tune 1
+
+```{r warning=FALSE}
+set.seed(seed = 1) 
+folds <- vfold_cv(train_set,6,2)
+
+set.seed(seed = 1) 
+folded <-  folds %>% 
+  # Cross join the xvg grid create above
+  expand_grid(xgb_grid) %>% 
+  # Then create analysis and assesment sets
+  mutate(analysis = map(splits, analysis),
   assesment = map(splits, assessment),
-  # Run Model against different mtry (number of predictors that will be randomly sampled at each split
-  # when creating the tree models)
-  boost_tree = map2(
-  analysis,
-  mtry,
-  ~ boost_tree(mode = "classification", mtry = .y, ) %>%
+  # Create a Recipe. Prepper is a wrapper for `prep()` which handles `split` objects
+  recipe = map(splits,~prepper(.x,recipe(location ~ ., data = train_set) %>% 
+  step_dummy(primary_fur_color,age,one_hot = T))),
+  # Now bake analysis and assesment sets
+  analysis = map2(recipe,analysis,bake),
+  assesment = map2(recipe,assesment,bake),
+  # Run model against analysis set with values for parameter objects defined
+  boost_tree = pmap(list(mtry,learn_rate,tree_depth,analysis),
+  ~ boost_tree(mode = "classification",mtry= ..1,learn_rate = ..2,tree_depth= ..3) %>%
   set_engine("xgboost") %>%
-  fit(location ~ ., data = .x)
+  fit(location ~ ., data = ..4)
   ),
-  # Create prediction for each model
+  # Create predictions for each model on the assesment set
   predictions_xgb = map2(
   assesment,
   boost_tree,
@@ -135,13 +189,224 @@ folded <- folds %>% bind_cols(mtry = 1:20) %>% mutate(
   predict(.y, new_data = .x) %>%
   bind_cols(.x %>% select(location))
   ),
+  # Compute accuracy metric
   accuracy = map(predictions_xgb,~ accuracy(., truth = location, estimate = .pred_class))
   ) %>% 
   unnest(accuracy)
 
-folded %>% ggplot(aes(x = mtry, y = .estimate)) + geom_line() # Best performance is mtry = 19 then 6 then 1
+
+
+# Visualise model performance by model id
+folded %>% ggplot(aes(x = as_factor(model_id), y = .estimate)) + geom_boxplot()
+
+# Table of top model combinations
+hi <- folded %>% group_by(model_id) %>% summarise(.estimate = median(.estimate)) %>% ungroup( )%>% filter(.estimate >0.85) %>% 
+  inner_join(xgb_grid) %>% arrange(desc(.estimate))
+hi
+#  Variance of model accuracy by paramter values
+folded %>% select(mtry:model_id,.estimate) %>% group_by(model_id)%>% pivot_longer(mtry:tree_depth) %>% ggplot(aes(x = value,y = .estimate,colour = as_factor(model_id))) + geom_point() + facet_wrap(~name,scales ="free_x") 
+
+# Mean accuracy for each parameter values
+folded %>% select(mtry:model_id,.estimate) %>% group_by(model_id)%>% pivot_longer(mtry:tree_depth) %>% group_by(name,value) %>% summarise(.estimate = mean(.estimate)) %>% ggplot(aes(x = value,y = .estimate)) + geom_point() + facet_wrap(~name,scales ="free_x") 
+             
+```
+
+Looking at the learn_rate graph we see that learn rates < 0.5 perform worse. Let's edit this parameter to only include 0.5 to 1 and rerun. Tree depth also looks like it can be reduced to between 1 and 10 but I will only make one change at a time.
+
+# Tune 2
+```{r warning=FALSE}
+set.seed(seed = 2) 
+xgb_grid <- grid_random(
+mtry(c(1,10)),
+learn_rate(c(0.5,1),trans = NULL),
+tree_depth(c(1,20)),
+size = 10) %>% mutate(model_id = row_number()) 
+
+xgb_grid
+```
+
+```{r warning=FALSE}
+set.seed(seed = 1) 
+folds <- vfold_cv(train_set,6,2)
+
+set.seed(seed = 1) 
+folded <-  folds %>% 
+  # Cross join the xvg grid create above
+  expand_grid(xgb_grid) %>% 
+  # Then create analysis and assesment sets
+  mutate(analysis = map(splits, analysis),
+  assesment = map(splits, assessment),
+  # Create a Recipe. Prepper is a wrapper for `prep()` which handles `split` objects
+  recipe = map(splits,~prepper(.x,recipe(location ~ ., data = train_set) %>% 
+  step_dummy(primary_fur_color,age,one_hot = T))),
+  # Now bake analysis and assesment sets
+  analysis = map2(recipe,analysis,bake),
+  assesment = map2(recipe,assesment,bake),
+  # Run model against analysis set with values for parameter objects defined
+  boost_tree = pmap(list(mtry,learn_rate,tree_depth,analysis),
+  ~ boost_tree(mode = "classification",mtry= ..1,learn_rate = ..2,tree_depth= ..3) %>%
+  set_engine("xgboost") %>%
+  fit(location ~ ., data = ..4)
+  ),
+  # Create predictions for each model on the assesment set
+  predictions_xgb = map2(
+  assesment,
+  boost_tree,
+  ~
+  predict(.y, new_data = .x) %>%
+  bind_cols(.x %>% select(location))
+  ),
+  # Compute accuracy metric
+  accuracy = map(predictions_xgb,~ accuracy(., truth = location, estimate = .pred_class))
+  ) %>% 
+  unnest(accuracy)
+
+
+
+# Visualise model performance by model id
+folded %>% ggplot(aes(x = as_factor(model_id), y = .estimate)) + geom_boxplot()
+
+# Table of top model combinations
+hi <- folded %>% group_by(model_id) %>% summarise(.estimate = median(.estimate)) %>% ungroup( )%>% filter(.estimate >0.85) %>% 
+  inner_join(xgb_grid) %>% arrange(desc(.estimate))
+hi
+#  Variance of model accuracy by paramter values
+folded %>% select(mtry:model_id,.estimate) %>% group_by(model_id)%>% pivot_longer(mtry:tree_depth) %>% ggplot(aes(x = value,y = .estimate,colour = as_factor(model_id))) + geom_point() + facet_wrap(~name,scales ="free_x") 
+
+# Mean accuracy for each parameter values
+folded %>% select(mtry:model_id,.estimate) %>% group_by(model_id)%>% pivot_longer(mtry:tree_depth) %>% group_by(name,value) %>% summarise(.estimate = mean(.estimate)) %>% ggplot(aes(x = value,y = .estimate)) + geom_point() + facet_wrap(~name,scales ="free_x") 
            
 ```
+
+From the above it apears an mtry around 5 works best. Let's change that parameter next.
+
+### Tune 3
+
+```{r warning=FALSE}
+set.seed(seed = 3) 
+xgb_grid <- grid_random(
+mtry(c(7,7)),
+learn_rate(c(0.5,0.8),trans = NULL),
+tree_depth(c(1,5)),
+size = 10) %>% mutate(model_id = row_number()) 
+
+xgb_grid
+```
+
+```{r warning=FALSE}
+set.seed(seed = 1) 
+folds <- vfold_cv(train_set,6,2)
+
+set.seed(seed = 1) 
+folded <-  folds %>% 
+  # Cross join the xvg grid create above
+  expand_grid(xgb_grid) %>% 
+  # Then create analysis and assesment sets
+  mutate(analysis = map(splits, analysis),
+  assesment = map(splits, assessment),
+  # Create a Recipe. Prepper is a wrapper for `prep()` which handles `split` objects
+  recipe = map(splits,~prepper(.x,recipe(location ~ ., data = train_set) %>% 
+  step_dummy(primary_fur_color,age,one_hot = T))),
+  # Now bake analysis and assesment sets
+  analysis = map2(recipe,analysis,bake),
+  assesment = map2(recipe,assesment,bake),
+  # Run model against analysis set with values for parameter objects defined
+  boost_tree = pmap(list(mtry,learn_rate,tree_depth,analysis),
+  ~ boost_tree(mode = "classification",mtry= ..1,learn_rate = ..2,tree_depth= ..3) %>%
+  set_engine("xgboost") %>%
+  fit(location ~ ., data = ..4)
+  ),
+  # Create predictions for each model on the assesment set
+  predictions_xgb = map2(
+  assesment,
+  boost_tree,
+  ~
+  predict(.y, new_data = .x) %>%
+  bind_cols(.x %>% select(location))
+  ),
+  # Compute accuracy metric
+  accuracy = map(predictions_xgb,~ accuracy(., truth = location, estimate = .pred_class))
+  ) %>% 
+  unnest(accuracy)
+
+
+
+# Visualise model performance by model id
+folded %>% ggplot(aes(x = as_factor(model_id), y = .estimate)) + geom_boxplot()
+
+# Table of top model combinations
+hi <- folded %>% group_by(model_id) %>% summarise(.estimate = median(.estimate)) %>% ungroup( )%>% filter(.estimate >0.85) %>% 
+  inner_join(xgb_grid) %>% arrange(desc(.estimate))
+hi
+#  Variance of model accuracy by paramter values
+folded %>% select(mtry:model_id,.estimate) %>% group_by(model_id)%>% pivot_longer(mtry:tree_depth) %>% ggplot(aes(x = value,y = .estimate,colour = as_factor(model_id))) + geom_point() + facet_wrap(~name,scales ="free_x") 
+
+# Mean accuracy for each parameter values
+folded %>% select(mtry:model_id,.estimate) %>% group_by(model_id)%>% pivot_longer(mtry:tree_depth) %>% group_by(name,value) %>% summarise(.estimate = mean(.estimate)) %>% ggplot(aes(x = value,y = .estimate)) + geom_point() + facet_wrap(~name,scales ="free_x") 
+           
+```
+
+## Choose parameters
+Our best performing model was using the following parameters:
+
+Now let's use this on the testing set.
+
+### Fit the model
+```{r warning=FALSE}
+set.seed(seed = 1) 
+boost_tree <- boost_tree(mode = "classification",mtry= 7,learn_rate = 0.75,tree_depth= 1) %>% 
+  set_engine("xgboost") %>% 
+  fit(location ~ ., data = train_baked)
+
+importance <- xgb.importance(feature_names = colnames(train_baked %>% select(-location)),model = boost_tree$fit)
+
+xgb.plot.importance(importance)
+```
+
+### Performance Assesment
+```{r warning=FALSE}
+predictions_xgb <- boost_tree %>% 
+  predict(new_data = test_baked) %>% 
+  bind_cols(test_baked %>% select(location))
+```
+
+There are several metrics that can be used to investigate the performance of a classification model but for simplicity I’m only focusing on a selection of them: accuracy, precision, recall and F1_Score.
+
+```{r warning=FALSE}
+predictions_xgb %>%
+  conf_mat(location, .pred_class) %>%
+  pluck(1) %>%
+  as_tibble() %>%
+  ggplot(aes(Prediction, Truth, alpha = n)) +
+  geom_tile(show.legend = FALSE) +
+  geom_text(aes(label = n), colour = "white", alpha = 1, size = 8)
+```
+
+```{r warning=FALSE}
+predictions_xgb %>%
+  conf_mat(location, .pred_class) %>% summary() %>% 
+  select(-.estimator) %>%
+  filter(.metric %in%
+    c("accuracy", "precision", "recall", "f_meas")) %>%
+  kable(digits = 2)
+```
+
+All in all, not a bad score. Although I wonder if we could have gotten similar score by the following logic:
+If Swquirrel Climbing then Above Plane
+
+```{r warning=FALSE}
+
+nyc_squirrels %>% 
+  mutate(guess = as_factor(if_else(climbing,'Above Ground','Ground Plane'))) %>% 
+  accuracy(estimate = guess,truth = location)
+```
+
+Well, it turns out guessing it's Above Plane if it's climbing gets you a accuracy of %84.5 which is more than our model!
+
+Back to the drawing board...
+
+### Next Steps: Fit the metalearner
+Use a multinomial regression as the metalearner.
 
 
 
