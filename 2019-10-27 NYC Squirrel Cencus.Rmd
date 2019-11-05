@@ -73,6 +73,10 @@ test_baked <- bake(recipe,new_data = test_set)
 boost_tree <- boost_tree(mode = "classification") %>% 
   set_engine("xgboost") %>% 
   fit(location ~ ., data = train_baked)
+
+importance <- xgb.importance(feature_names = colnames(train_baked %>% select(-location)),model = boost_tree$fit)
+
+xgb.plot.importance(importance)
 ```
 
 ### Performance Assesment
@@ -93,22 +97,51 @@ predictions_xgb %>%
   geom_text(aes(label = n), colour = "white", alpha = 1, size = 8)
 ```
 
-```{r}
-predictions_xgb %>%
-  metrics(location, .pred_class) %>%
-  select(-.estimator) %>%
-  filter(.metric == "accuracy")
-```
 
 ```{r}
-tibble(
-  "precision" = 
-     precision(predictions_xgb, location, .pred_class) %>%
-     select(.estimate),
-  "recall" = 
-     recall(predictions_xgb, location, .pred_class) %>%
-     select(.estimate)
-) %>%
+predictions_xgb %>%
+  conf_mat(location, .pred_class) %>% summary() %>% 
+  select(-.estimator) %>%
+  filter(.metric %in%
+    c("accuracy", "precision", "recall", "f_meas")) %>%
   kable(digits = 2)
 ```
+
+Wow, so on first go it seems we have built a model which can fairly accuractely predict if a squirrel is above ground or not.
+
+### Hyper Parameter Tuning
+
+```{r}
+folds <- vfold_cv(train_baked,20)
+
+folded <- folds %>% bind_cols(mtry = 1:20) %>% mutate(
+  # First create analysis and assesment sets
+  analysis = map(splits, analysis),
+  assesment = map(splits, assessment),
+  # Run Model against different mtry (number of predictors that will be randomly sampled at each split
+  # when creating the tree models)
+  boost_tree = map2(
+  analysis,
+  mtry,
+  ~ boost_tree(mode = "classification", mtry = .y, ) %>%
+  set_engine("xgboost") %>%
+  fit(location ~ ., data = .x)
+  ),
+  # Create prediction for each model
+  predictions_xgb = map2(
+  assesment,
+  boost_tree,
+  ~
+  predict(.y, new_data = .x) %>%
+  bind_cols(.x %>% select(location))
+  ),
+  accuracy = map(predictions_xgb,~ accuracy(., truth = location, estimate = .pred_class))
+  ) %>% 
+  unnest(accuracy)
+
+folded %>% ggplot(aes(x = mtry, y = .estimate)) + geom_line() # Best performance is mtry = 19 then 6 then 1
+           
+```
+
+
 
