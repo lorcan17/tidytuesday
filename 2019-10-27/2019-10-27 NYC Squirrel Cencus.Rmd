@@ -1,6 +1,8 @@
 ---
 title: "2019-10-27 NYC Squirrel Census"
 output: rmarkdown::github_document
+editor_options: 
+  chunk_output_type: console
 ---
 # 2019-10-27 NYC Squirrel Census
 
@@ -28,7 +30,8 @@ library(janitor)
 library(xgboost)
 ```
 
-Now clean
+Now clean the dataset so all the column types are in their correctf format.
+
 ```{r Clean Data, warning=FALSE}
 nyc_squirrels_raw <- readr::read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2019/2019-10-29/nyc_squirrels.csv")
 nyc_squirrels <- nyc_squirrels_raw %>% mutate(shift = as_factor(shift),
@@ -38,20 +41,35 @@ nyc_squirrels <- nyc_squirrels_raw %>% mutate(shift = as_factor(shift),
                                               #highlight_fur_color = fct_explicit_na(highlight_fur_color))
                                               location = fct_explicit_na(fct_relevel(location,"Ground Plane")))
 # Only interested in the below variables
-nyc_squirrels <- nyc_squirrels %>%  select(date,age,primary_fur_color,location,running,chasing,climbing,eating,foraging, kuks,tail_flags,approaches,indifferent,runs_from)
+nyc_squirrels <- nyc_squirrels %>%  select(age,primary_fur_color,location,running,chasing,climbing,eating,foraging, kuks,tail_flags,approaches,indifferent,runs_from)
 
+nyc_squirrels
 ```
 
-Given that there are only 64 missing data points for location, I will remove these.
+Given that there are only 64 missing data points for `location`, I will remove these. Also, I will remove the 55 missing data points for `primary_fur_colour`.
 
 ```{r warning=FALSE}
 nyc_squirrels %>% count(location)
-nyc_squirrels <- nyc_squirrels %>% filter(location != "(Missing)") %>% droplevels()
+nyc_squirrels <- nyc_squirrels %>% filter(location != "(Missing)",primary_fur_color != "(Missing)") %>% droplevels()
 
 ```
 
+### Benchmark
+
+First we will set a benchmark score to beat with our model by simply guessing that a squirel will be Above Plane when climbing and Ground plane when not.
+
+```{r warning=FALSE}
+
+model_benchmark <- nyc_squirrels %>% 
+  mutate(guess = as_factor(if_else(climbing,'Above Ground','Ground Plane'))) %>% 
+  accuracy(estimate = guess,truth = location) %>% select(.estimate) %>% pull()
+```
+
+Well, it turns out guessing it's Above Plane if it's climbing gets you a accuracy of `r round(model_benchmark,2)`.
+
+## Model
 ### Train and Test Split
-Firstly, create a randomised training and test plit of the original data.
+Firstly, create a randomised training and test split of the original data.
 
 ```{r warning=FALSE}
 set.seed(seed = 1) 
@@ -86,6 +104,7 @@ boost_tree <- boost_tree(mode = "classification") %>%
 importance <- xgb.importance(feature_names = colnames(train_baked %>% select(-location)),model = boost_tree$fit)
 
 xgb.plot.importance(importance)
+
 ```
 
 ### Performance Assesment
@@ -109,15 +128,18 @@ predictions_xgb %>%
 ```
 
 ```{r warning=FALSE}
-predictions_xgb %>%
+model_metrics <- predictions_xgb %>%
   conf_mat(location, .pred_class) %>% summary() %>% 
   select(-.estimator) %>%
   filter(.metric %in%
-    c("accuracy", "precision", "recall", "f_meas")) %>%
+    c("accuracy", "precision", "recall", "f_meas"))
+
+model_accuracy <- model_metrics %>% filter(.metric == "accuracy") %>% select(.estimate) %>% pull()
+model_metrics %>%
   kable(digits = 2)
 ```
 
-Wow, so on first go it seems we have built a model which can fairly accuractely predict if a squirrel is above ground or not.
+It seems our model score of `r round(model_accuracy,2)` is worse than the benchmark set.
 
 ```{r warning=FALSE}
 boost_tree %>% 
@@ -131,16 +153,22 @@ boost_tree %>%
 Create a random grid of parameters object values. Parameters we can tune can be found here: 
 https://tidymodels.github.io/parsnip/reference/boost_tree.html
 
-I have chosen to tune mtry, learn rate, and tree depth only but could have tuned all found in the above link.
+Guide: 
+
+*Control Model Complexitiy - max_depth, min_child_weight, and gamma 
+*Robust to noise - subsample, colsample_bytree
+
 
 ```{r warning=FALSE}
 library(dials)
 set.seed(seed = 1) 
 
 xgb_grid <- grid_random(
-mtry(c(1,10)),
-learn_rate(c(0,1),trans = NULL),
-tree_depth(c(1,20)),
+trees(c(1,100)), # Number of boosting iterations
+min_n(c(1,20)), # Min number of data points in a node to split it further
+tree_depth(c(1,20)), # Number of splits
+learn_rate(c(0,1),trans = NULL), # eta
+loss_reduction(c(0,1),trans = NULL), # gamma
 size = 10) %>% mutate(model_id = row_number()) 
 
 xgb_grid
@@ -160,7 +188,7 @@ https://machinelearningmastery.com/k-fold-cross-validation/
 
 ```{r warning=FALSE}
 set.seed(seed = 1) 
-folds <- vfold_cv(train_set,6,2)
+folds <- vfold_cv(train_set,5,2)
 
 set.seed(seed = 1) 
 folded <-  folds %>% 
@@ -176,10 +204,10 @@ folded <-  folds %>%
   analysis = map2(recipe,analysis,bake),
   assesment = map2(recipe,assesment,bake),
   # Run model against analysis set with values for parameter objects defined
-  boost_tree = pmap(list(mtry,learn_rate,tree_depth,analysis),
-  ~ boost_tree(mode = "classification",mtry= ..1,learn_rate = ..2,tree_depth= ..3) %>%
+  boost_tree = pmap(list(trees,min_n,tree_depth,learn_rate,loss_reduction,analysis),
+  ~ boost_tree(mode = "classification",trees= ..1,min_n = ..2,tree_depth= ..3,learn_rate = ..4, loss_reduction =  ..5) %>% 
   set_engine("xgboost") %>%
-  fit(location ~ ., data = ..4)
+  fit(location ~ ., data = ..6)
   ),
   # Create predictions for each model on the assesment set
   predictions_xgb = map2(
@@ -200,36 +228,43 @@ folded <-  folds %>%
 folded %>% ggplot(aes(x = as_factor(model_id), y = .estimate)) + geom_boxplot()
 
 # Table of top model combinations
-hi <- folded %>% group_by(model_id) %>% summarise(.estimate = median(.estimate)) %>% ungroup( )%>% filter(.estimate >0.85) %>% 
+hi <- folded %>% group_by(model_id) %>% summarise(.estimate = median(.estimate)) %>% ungroup( )%>% filter(.estimate >model_benchmark) %>% 
   inner_join(xgb_grid) %>% arrange(desc(.estimate))
 hi
 #  Variance of model accuracy by paramter values
-folded %>% select(mtry:model_id,.estimate) %>% group_by(model_id)%>% pivot_longer(mtry:tree_depth) %>% ggplot(aes(x = value,y = .estimate,colour = as_factor(model_id))) + geom_point() + facet_wrap(~name,scales ="free_x") 
+folded %>% select(trees:model_id,.estimate) %>% group_by(model_id)%>% pivot_longer(trees:loss_reduction) %>% ggplot(aes(x = value,y = .estimate,colour = as_factor(model_id))) + geom_point() + facet_wrap(~name,scales ="free_x") 
 
 # Mean accuracy for each parameter values
-folded %>% select(mtry:model_id,.estimate) %>% group_by(model_id)%>% pivot_longer(mtry:tree_depth) %>% group_by(name,value) %>% summarise(.estimate = mean(.estimate)) %>% ggplot(aes(x = value,y = .estimate)) + geom_point() + facet_wrap(~name,scales ="free_x") 
+folded %>% select(trees:model_id,.estimate) %>% group_by(model_id)%>% pivot_longer(trees:loss_reduction) %>% group_by(name,value) %>% summarise(.estimate = mean(.estimate)) %>% ggplot(aes(x = value,y = .estimate)) + geom_point() + facet_wrap(~name,scales ="free_x") 
              
 ```
 
-Looking at the learn_rate graph we see that learn rates < 0.5 perform worse. Let's edit this parameter to only include 0.5 to 1 and rerun. Tree depth also looks like it can be reduced to between 1 and 10 but I will only make one change at a time.
+Looking at the graph which shows mean accuracy by parameter. We can see the following:
+
+*`min_n` performs best when roughly 10.
+*`trees` perfroms best when greater than 50
+*`loss_reduction` performs better when greater than 0.25
+
+The other paramters show no clear pattern so will only change the values for the above.
 
 # Tune 2
 ```{r warning=FALSE}
 set.seed(seed = 2) 
 xgb_grid <- grid_random(
-mtry(c(1,10)),
-learn_rate(c(0.5,1),trans = NULL),
-tree_depth(c(1,20)),
+trees(c(50,100)), # Number of boosting iterations
+min_n(c(7,13)), # Min number of data points in a node to split it further
+tree_depth(c(1,20)), # Number of splits
+learn_rate(c(0,1),trans = NULL), # eta
+loss_reduction(c(0.3,1),trans = NULL), # gamma
 size = 10) %>% mutate(model_id = row_number()) 
 
 xgb_grid
 ```
 
 ```{r warning=FALSE}
-set.seed(seed = 1) 
-folds <- vfold_cv(train_set,6,2)
+set.seed(seed = 2) 
+folds <- vfold_cv(train_set,5,2)
 
-set.seed(seed = 1) 
 folded <-  folds %>% 
   # Cross join the xvg grid create above
   expand_grid(xgb_grid) %>% 
@@ -243,10 +278,10 @@ folded <-  folds %>%
   analysis = map2(recipe,analysis,bake),
   assesment = map2(recipe,assesment,bake),
   # Run model against analysis set with values for parameter objects defined
-  boost_tree = pmap(list(mtry,learn_rate,tree_depth,analysis),
-  ~ boost_tree(mode = "classification",mtry= ..1,learn_rate = ..2,tree_depth= ..3) %>%
+  boost_tree = pmap(list(trees,min_n,tree_depth,learn_rate,loss_reduction,analysis),
+  ~ boost_tree(mode = "classification",trees= ..1,min_n = ..2,tree_depth= ..3,learn_rate = ..4, loss_reduction =  ..5) %>% 
   set_engine("xgboost") %>%
-  fit(location ~ ., data = ..4)
+  fit(location ~ ., data = ..6)
   ),
   # Create predictions for each model on the assesment set
   predictions_xgb = map2(
@@ -267,37 +302,44 @@ folded <-  folds %>%
 folded %>% ggplot(aes(x = as_factor(model_id), y = .estimate)) + geom_boxplot()
 
 # Table of top model combinations
-hi <- folded %>% group_by(model_id) %>% summarise(.estimate = median(.estimate)) %>% ungroup( )%>% filter(.estimate >0.85) %>% 
+hi <- folded %>% group_by(model_id) %>% summarise(.estimate = median(.estimate)) %>% ungroup( )%>% filter(.estimate >model_benchmark) %>% 
   inner_join(xgb_grid) %>% arrange(desc(.estimate))
 hi
 #  Variance of model accuracy by paramter values
-folded %>% select(mtry:model_id,.estimate) %>% group_by(model_id)%>% pivot_longer(mtry:tree_depth) %>% ggplot(aes(x = value,y = .estimate,colour = as_factor(model_id))) + geom_point() + facet_wrap(~name,scales ="free_x") 
+folded %>% select(trees:model_id,.estimate) %>% group_by(model_id)%>% pivot_longer(trees:loss_reduction) %>% ggplot(aes(x = value,y = .estimate,colour = as_factor(model_id))) + geom_point() + facet_wrap(~name,scales ="free_x") 
 
 # Mean accuracy for each parameter values
-folded %>% select(mtry:model_id,.estimate) %>% group_by(model_id)%>% pivot_longer(mtry:tree_depth) %>% group_by(name,value) %>% summarise(.estimate = mean(.estimate)) %>% ggplot(aes(x = value,y = .estimate)) + geom_point() + facet_wrap(~name,scales ="free_x") 
-           
+folded %>% select(trees:model_id,.estimate) %>% group_by(model_id)%>% pivot_longer(trees:loss_reduction) %>% group_by(name,value) %>% summarise(.estimate = mean(.estimate)) %>% ggplot(aes(x = value,y = .estimate)) + geom_point() + facet_wrap(~name,scales ="free_x") 
+             
 ```
 
-From the above it apears an mtry around 5 works best. Let's change that parameter next.
+Looking at the graph which shows mean accuracy by parameter. We can see the following:
+
+*`min_n` performs best between 7 and 9.
+*`tree_depth` perfroms best between greater than 4 and 9
+*`loss_reduction` performs better when less than 0.9
+
+The other paramters show no clear pattern so will only change the values for the above.
 
 ### Tune 3
 
 ```{r warning=FALSE}
 set.seed(seed = 3) 
 xgb_grid <- grid_random(
-mtry(c(7,7)),
-learn_rate(c(0.5,0.8),trans = NULL),
-tree_depth(c(1,5)),
+trees(c(50,100)), # Number of boosting iterations
+min_n(c(7,9)), # Min number of data points in a node to split it further
+tree_depth(c(4,9)), # Number of splits
+learn_rate(c(0,1),trans = NULL), # eta
+loss_reduction(c(0.3,0.9),trans = NULL), # gamma
 size = 10) %>% mutate(model_id = row_number()) 
 
 xgb_grid
 ```
 
 ```{r warning=FALSE}
-set.seed(seed = 1) 
-folds <- vfold_cv(train_set,6,2)
+set.seed(seed = 3) 
+folds <- vfold_cv(train_set,5,2)
 
-set.seed(seed = 1) 
 folded <-  folds %>% 
   # Cross join the xvg grid create above
   expand_grid(xgb_grid) %>% 
@@ -311,10 +353,10 @@ folded <-  folds %>%
   analysis = map2(recipe,analysis,bake),
   assesment = map2(recipe,assesment,bake),
   # Run model against analysis set with values for parameter objects defined
-  boost_tree = pmap(list(mtry,learn_rate,tree_depth,analysis),
-  ~ boost_tree(mode = "classification",mtry= ..1,learn_rate = ..2,tree_depth= ..3) %>%
+  boost_tree = pmap(list(trees,min_n,tree_depth,learn_rate,loss_reduction,analysis),
+  ~ boost_tree(mode = "classification",trees= ..1,min_n = ..2,tree_depth= ..3,learn_rate = ..4, loss_reduction =  ..5) %>% 
   set_engine("xgboost") %>%
-  fit(location ~ ., data = ..4)
+  fit(location ~ ., data = ..6)
   ),
   # Create predictions for each model on the assesment set
   predictions_xgb = map2(
@@ -335,15 +377,15 @@ folded <-  folds %>%
 folded %>% ggplot(aes(x = as_factor(model_id), y = .estimate)) + geom_boxplot()
 
 # Table of top model combinations
-hi <- folded %>% group_by(model_id) %>% summarise(.estimate = median(.estimate)) %>% ungroup( )%>% filter(.estimate >0.85) %>% 
+hi <- folded %>% group_by(model_id) %>% summarise(.estimate = median(.estimate)) %>% ungroup( )%>% filter(.estimate >model_benchmark) %>% 
   inner_join(xgb_grid) %>% arrange(desc(.estimate))
 hi
 #  Variance of model accuracy by paramter values
-folded %>% select(mtry:model_id,.estimate) %>% group_by(model_id)%>% pivot_longer(mtry:tree_depth) %>% ggplot(aes(x = value,y = .estimate,colour = as_factor(model_id))) + geom_point() + facet_wrap(~name,scales ="free_x") 
+folded %>% select(trees:model_id,.estimate) %>% group_by(model_id)%>% pivot_longer(trees:loss_reduction) %>% ggplot(aes(x = value,y = .estimate,colour = as_factor(model_id))) + geom_point() + facet_wrap(~name,scales ="free_x") 
 
 # Mean accuracy for each parameter values
-folded %>% select(mtry:model_id,.estimate) %>% group_by(model_id)%>% pivot_longer(mtry:tree_depth) %>% group_by(name,value) %>% summarise(.estimate = mean(.estimate)) %>% ggplot(aes(x = value,y = .estimate)) + geom_point() + facet_wrap(~name,scales ="free_x") 
-           
+folded %>% select(trees:model_id,.estimate) %>% group_by(model_id)%>% pivot_longer(trees:loss_reduction) %>% group_by(name,value) %>% summarise(.estimate = mean(.estimate)) %>% ggplot(aes(x = value,y = .estimate)) + geom_point() + facet_wrap(~name,scales ="free_x") 
+             
 ```
 
 ## Choose parameters
@@ -354,8 +396,16 @@ Now let's use this on the testing set.
 ### Fit the model
 ```{r warning=FALSE}
 set.seed(seed = 1) 
-boost_tree <- boost_tree(mode = "classification",mtry= 7,learn_rate = 0.75,tree_depth= 1) %>% 
-  set_engine("xgboost") %>% 
+boost_tree <-
+  boost_tree(
+  mode = "classification",
+  trees = 89,
+  min_n = 7,
+  tree_depth = 7,
+  learn_rate = 0.314,
+  loss_reduction = 0.377
+  ) %>%
+  set_engine("xgboost") %>%
   fit(location ~ ., data = train_baked)
 
 importance <- xgb.importance(feature_names = colnames(train_baked %>% select(-location)),model = boost_tree$fit)
@@ -369,8 +419,6 @@ predictions_xgb <- boost_tree %>%
   predict(new_data = test_baked) %>% 
   bind_cols(test_baked %>% select(location))
 ```
-
-There are several metrics that can be used to investigate the performance of a classification model but for simplicity I’m only focusing on a selection of them: accuracy, precision, recall and F1_Score.
 
 ```{r warning=FALSE}
 predictions_xgb %>%
@@ -391,19 +439,6 @@ predictions_xgb %>%
   kable(digits = 2)
 ```
 
-All in all, not a bad score. Although I wonder if we could have gotten similar score by the following logic:
-If Swquirrel Climbing then Above Plane
-
-```{r warning=FALSE}
-
-nyc_squirrels %>% 
-  mutate(guess = as_factor(if_else(climbing,'Above Ground','Ground Plane'))) %>% 
-  accuracy(estimate = guess,truth = location)
-```
-
-Well, it turns out guessing it's Above Plane if it's climbing gets you a accuracy of %84.5 which is more than our model!
-
-Back to the drawing board...
 
 ### Next Steps: Fit the metalearner
 Use a multinomial regression as the metalearner.
